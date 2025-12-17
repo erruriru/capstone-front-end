@@ -3,28 +3,83 @@ include "../conn.php";
 session_start();
 
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $username = trim($_POST["username"] ?? '');
-    $password = $_POST["password"] ?? '';
+  $username = trim($_POST["username"] ?? '');
+  $password = $_POST["password"] ?? '';
 
-    // Use prepared statement
-    $stmt = $conn->prepare("SELECT id, username, password FROM admins WHERE username = ? LIMIT 1");
-    $stmt->bind_param("s", $username);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $admin = $result->fetch_assoc();
+  $stmt = $conn->prepare("
+      SELECT id, username, password, failed_attempts, locked_until 
+      FROM admins 
+      WHERE username = ? 
+      LIMIT 1
+  ");
+  $stmt->bind_param("s", $username);
+  $stmt->execute();
+  $result = $stmt->get_result();
+  $admin = $result->fetch_assoc();
 
-    if ($admin && password_verify($password, $admin['password'])) {
-        // Login success
-        $_SESSION["username"] = $admin['username'];
-        header("location: admin_dashboard.php");
-        exit();
-    } else {
-        // Invalid credentials
-        $_SESSION["error"] = "Incorrect username or password. Please try again.";
-        header("Location: " . $_SERVER["PHP_SELF"]);
-        exit();
-    }
+  // Check if account exists
+  if ($admin) {
+
+      // Check if account is locked
+      if ($admin['locked_until'] && strtotime($admin['locked_until']) > time()) {
+          $_SESSION["error"] = "Account locked due to multiple failed attempts. Please reset your password.";
+          header("Location: " . $_SERVER["PHP_SELF"]);
+          exit();
+      }
+
+      // Verify password
+      if (password_verify($password, $admin['password'])) {
+
+          // Reset failed attempts on success
+          $resetStmt = $conn->prepare("
+              UPDATE admins 
+              SET failed_attempts = 0, locked_until = NULL 
+              WHERE id = ?
+          ");
+          $resetStmt->bind_param("i", $admin['id']);
+          $resetStmt->execute();
+
+          $_SESSION["username"] = $admin['username'];
+          header("location: admin_dashboard.php");
+          exit();
+
+      } else {
+          // Increment failed attempts
+          $attempts = $admin['failed_attempts'] + 1;
+
+          if ($attempts >= 5) {
+              // Lock account
+              $lockStmt = $conn->prepare("
+                  UPDATE admins 
+                  SET failed_attempts = ?, locked_until = NOW() 
+                  WHERE id = ?
+              ");
+              $lockStmt->bind_param("ii", $attempts, $admin['id']);
+              $lockStmt->execute();
+
+              $_SESSION["error"] = "Too many failed attempts. Your account has been locked. Please reset your password.";
+          } else {
+              $updateStmt = $conn->prepare("
+                  UPDATE admins 
+                  SET failed_attempts = ? 
+                  WHERE id = ?
+              ");
+              $updateStmt->bind_param("ii", $attempts, $admin['id']);
+              $updateStmt->execute();
+
+              $_SESSION["error"] = "Incorrect username or password. Attempt {$attempts}/5.";
+          }
+
+          header("Location: " . $_SERVER["PHP_SELF"]);
+          exit();
+      }
+  } else {
+      $_SESSION["error"] = "Incorrect username or password.";
+      header("Location: " . $_SERVER["PHP_SELF"]);
+      exit();
+  }
 }
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -58,6 +113,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg> -->
           </button>
+          <a href="admin_reset_request.php" 
+              class="text-xs mt-3 text-right underline hover:text-accent">
+                      Forgot password?
+          </a>
+
           <script>
             
           </script>
